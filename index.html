@@ -1,0 +1,1268 @@
+<!doctype html>
+<html lang="az">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Circle of Doom</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+
+<!--
+================================================================================
+ CIRCLE OF DOOM  -  F1 yarışının vaxt fərqinə görə dairəvi vizuallaşdırması
+================================================================================
+
+ FAYLIN XƏRİTƏSİ (yuxarıdan aşağıya)
+   1. <style>   : görünüş (rənglər, yerləşmə). Rənglər "token"lərdə (--bg, --fg ...) saxlanır.
+   2. <body>    : səhifənin skeleti (dairə üçün <svg>, sağda idarə panelləri).
+   3. <script>  : bütün məntiq. Bölmələr:
+        1) SABİTLƏR           - ölçülər, sürücü siyahısı
+        2) KÖMƏKÇİ FUNKSİYALAR - vaxt formatı, təsadüfi say generatoru
+        3) SİMULYATOR         - uydurma amma real görünən yarış yaradır
+        4) OPENF1 (API)       - real məlumatı internetdən çəkir (təkrar + canlı)
+        5) FRAME HESABLAYICI  - "T saniyəsində hər kəs harada?" sualının cavabı
+        6) PİT PROQNOZU       - "indi pit etsə hansı yerə düşər?"
+        7) ÇƏKİM (SVG)        - hesablanmış nəticəni ekrana çəkir
+        8) İDARƏETMƏ          - düymələr, klik, animasiya dövrü
+
+ ƏSAS İDEYA (hər şey bundan çıxır)
+   Dairə BİR DÖVRƏNİN VAXTIDIR (məs. 90 san). Lider yuxarıda dayanır.
+   Digər sürücü liderdən 9 saniyə geridədirsə, o, dairədə 9/90 = 10% yerə,
+   yəni 36 dərəcə saat əqrəbinin əksinə yerləşir. Məsafə (metr) yox, VAXT.
+
+ MƏLUMAT AXINI
+   mənbə (simulyator / OpenF1)  ->  RACE obyekti  ->  computeFrame(race, T)
+   ->  FRAME obyekti  ->  draw(frame)  ->  ekran
+   Çəkim kodu məlumatın haradan gəldiyini bilmir. Buna görə üç mənbə eyni
+   dairəni çəkə bilir.
+================================================================================
+-->
+
+<style>
+/* ---------- 1. RƏNG VƏ ŞRİFT TOKENLƏRİ ----------
+   Bütün rənglər burada bir dəfə təyin olunur, qalan yerlərdə var(--ad) ilə
+   istifadə edilir. Tünd rejim üçün yalnız dəyərlər dəyişir. */
+:root{
+  --bg:#eef0f3;      /* səhifə fonu */
+  --panel:#ffffff;   /* kartlar */
+  --line:#d3d9e0;    /* nazik xətlər */
+  --fg:#14181d;      /* əsas mətn */
+  --muted:#5b6672;   /* ikinci dərəcəli mətn */
+  --ring:#c2c9d2;    /* dairənin rəngi */
+  --accent:#7c3aed;  /* seçim və pit proqnozu (bənövşəyi) */
+  --good:#12804a;    /* Track Clear */
+  --warn:#b36b00;    /* Safety Car */
+  --font-d:'Barlow Condensed','Arial Narrow',Arial,sans-serif; /* rəqəm və etiketlər */
+  --font-b:'Barlow',system-ui,-apple-system,'Segoe UI',Arial,sans-serif; /* mətn */
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0c0e11; --panel:#14181d; --line:#262d36; --fg:#e8ebef; --muted:#8b95a1;
+    --ring:#323a45; --accent:#a78bfa; --good:#3ddc84; --warn:#ffb020;
+    color-scheme:dark;
+  }
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:15px/1.45 var(--font-b);
+  padding-block:20px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+}
+h1,h2{font-family:var(--font-d);margin:0;font-weight:700}
+.wrap{max-width:1240px;margin:0 auto}
+
+/* ---------- başlıq ---------- */
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+h1{font-size:44px;line-height:1;letter-spacing:.01em;text-transform:uppercase}
+.sub{margin:6px 0 0;color:var(--muted);max-width:60ch}
+.clock{font:600 30px/1 var(--font-d);font-variant-numeric:tabular-nums;color:var(--muted)}
+
+/* ---------- əsas yerləşmə: solda dairə, sağda panel ----------
+   minmax(0,1fr) vacibdir: onsuz SVG sütunu genişləndirib səhifəni sağa qaydırır. */
+.grid{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:980px){ .grid{grid-template-columns:minmax(0,1fr) 380px;align-items:start} }
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px}
+#ring{display:block;width:100%;height:auto;max-height:90vh;margin:0 auto}
+.side{display:flex;flex-direction:column;gap:12px;min-width:0}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2,.card summary{font-size:14px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.card summary{cursor:pointer;margin:0;font:700 14px var(--font-d)}
+.card details p{margin:10px 0 0;color:var(--muted)}
+
+/* ---------- düymələr ---------- */
+button,input,select{font:inherit;color:inherit}
+button{
+  background:transparent;border:1px solid var(--line);border-radius:6px;
+  padding:7px 12px;cursor:pointer;min-height:36px;
+}
+button:hover{border-color:var(--muted)}
+button[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+button:disabled{opacity:.4;cursor:not-allowed}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seg{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.seg button{flex:1 1 auto}
+input[type=text],input[type=password],input[type=number],select{
+  background:transparent;border:1px solid var(--line);border-radius:6px;padding:7px 9px;min-height:36px;min-width:0;
+}
+input[type=range]{width:100%;accent-color:var(--accent)}
+label{display:block;font-size:13px;color:var(--muted);margin:8px 0 4px}
+.msg{margin:10px 0 0;font-size:13px;color:var(--muted);min-height:1.4em;overflow-wrap:anywhere}
+.msg.err{color:#d6453d}
+.msg.ok{color:var(--good)}
+
+/* ---------- sıralama siyahısı ---------- */
+#board{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:2px 10px}
+@media (min-width:980px){ #board{grid-template-columns:1fr} }
+#board li{
+  display:grid;grid-template-columns:24px 4px 1fr auto;gap:8px;align-items:center;
+  padding:4px 6px;border-radius:5px;cursor:pointer;font:600 17px var(--font-d);
+}
+#board li:hover{background:color-mix(in srgb,var(--fg) 7%,transparent)}
+#board li.sel{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+#board .pos{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+#board .sw{width:4px;height:18px;border-radius:2px}
+#board .gap{color:var(--muted);font-variant-numeric:tabular-nums}
+#pitOut p{margin:4px 0;font-size:14px}
+#pitOut .big{font:700 30px/1.1 var(--font-d);color:var(--accent)}
+
+/* ---------- SVG daxili üslublar ----------
+   SVG elementlərinə də CSS ilə rəng veririk ki, tünd rejim avtomatik işləsin. */
+#ring text{font-family:var(--font-d);fill:var(--fg)}
+.ring-base{fill:none;stroke:var(--ring);stroke-width:4}
+#ring.sc .ring-base{stroke:var(--warn);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){ #ring.sc .ring-base{animation:none} }
+.tick{stroke:var(--ring);stroke-width:2}
+.tick-t{font-size:15px;fill:var(--muted)!important;text-anchor:middle;dominant-baseline:middle}
+.t-lap{font-size:92px;font-weight:700;text-anchor:middle;font-variant-numeric:tabular-nums}
+.t-ref,.t-info{font-size:20px;text-anchor:middle;fill:var(--muted)!important;font-variant-numeric:tabular-nums}
+.t-pit{font-size:22px;font-weight:600;text-anchor:middle;fill:var(--accent)!important}
+.pill{font-size:21px;font-weight:600;text-anchor:middle;letter-spacing:.04em}
+.pill.GREEN{fill:var(--good)!important}
+.pill.SC{fill:var(--warn)!important}
+.pill.FINISHED{fill:var(--fg)!important}
+.drv{cursor:pointer;outline:none}
+.conn{stroke:var(--ring);stroke-width:1;opacity:.75}
+.halo{fill:none;stroke:var(--accent);stroke-width:3;display:none}
+.dot{stroke:var(--panel);stroke-width:2.5}
+.lab rect{fill:var(--panel);stroke-width:2}
+.lc{font-size:19px;font-weight:700;text-anchor:middle}
+.lg{font-size:15px;font-weight:500;text-anchor:middle;fill:var(--muted)!important;font-variant-numeric:tabular-nums}
+.drv.sel .halo{display:block}
+.drv.sel .lab rect{stroke:var(--accent)!important;stroke-width:3.5}
+.drv.sel .lg{fill:var(--fg)!important}
+.drv.out{opacity:.35}
+.drv:focus-visible .lab rect{stroke:var(--accent)!important;stroke-width:3.5}
+.pit-arc{fill:none;stroke:var(--accent);stroke-width:12;stroke-linecap:round;opacity:.55}
+.ghost{fill:none;stroke:var(--accent);stroke-width:3;stroke-dasharray:4 3}
+.ghost-t{font-size:22px;font-weight:700;fill:var(--accent)!important;text-anchor:middle;dominant-baseline:middle}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1 lang="en">Circle of Doom</h1>
+      <p class="sub">Formula 1 yarışı bir dairədə. Sürücülər məsafəyə yox, liderdən olan vaxt fərqinə görə düzülür.</p>
+    </div>
+    <div class="clock" id="clock" title="Yarış vaxtı">00:00:00</div>
+  </header>
+
+  <main class="grid">
+
+    <!-- Dairənin özü. viewBox="0 0 920 920" daxili koordinat sistemidir: ekran
+         ölçüsündən asılı olmayaraq kodda həmişə 920x920 kvadratında düşünürük. -->
+    <section class="stage">
+      <svg id="ring" viewBox="0 0 920 920" role="group" aria-label="Sürücülərin liderdən vaxt fərqinə görə dairəvi düzülüşü"></svg>
+    </section>
+
+    <aside class="side">
+
+      <section class="card">
+        <h2>Məlumat mənbəyi</h2>
+        <div class="seg" id="modeSeg">
+          <button type="button" data-mode="sim" aria-pressed="true">Simulyasiya</button>
+          <button type="button" data-mode="replay" aria-pressed="false">OpenF1 təkrar</button>
+          <button type="button" data-mode="live" aria-pressed="false">OpenF1 canlı</button>
+        </div>
+
+        <div id="panelSim">
+          <div class="row">
+            <button type="button" id="newRace">Yeni yarış</button>
+            <span class="muted" style="color:var(--muted)">seed: <b id="seedOut">2026</b></span>
+          </div>
+        </div>
+
+        <div id="panelReplay" hidden>
+          <label for="year">İl</label>
+          <div class="row">
+            <input type="number" id="year" value="2025" min="2023" max="2030" style="width:90px">
+            <button type="button" id="loadList">Yarışları gətir</button>
+          </div>
+          <label for="gp">Qran-pri</label>
+          <select id="gp" style="width:100%"><option value="">Əvvəlcə siyahını gətirin</option></select>
+          <div class="row" style="margin-top:10px"><button type="button" id="loadRace" disabled>Yarışı yüklə</button></div>
+        </div>
+
+        <div id="panelLive" hidden>
+          <p style="margin:0;color:var(--muted);font-size:13px">Hər 7 saniyədən bir OpenF1-dən son fərqləri çəkir. Sessiya gedərkən OpenF1 token tələb edə bilər.</p>
+          <label for="token">Token (ixtiyari, yalnız yaddaşda qalır)</label>
+          <input type="password" id="token" style="width:100%" autocomplete="off" placeholder="Bearer token">
+        </div>
+
+        <p class="msg" id="msg" role="status"></p>
+      </section>
+
+      <section class="card" id="transport">
+        <h2>İdarə</h2>
+        <div class="row">
+          <button type="button" id="play">Dayandır</button>
+          <div class="row" id="speeds" role="group" aria-label="Sürət">
+            <button type="button" data-speed="1" aria-pressed="false">1×</button>
+            <button type="button" data-speed="5" aria-pressed="false">5×</button>
+            <button type="button" data-speed="20" aria-pressed="true">20×</button>
+            <button type="button" data-speed="60" aria-pressed="false">60×</button>
+            <button type="button" data-speed="200" aria-pressed="false">200×</button>
+          </div>
+        </div>
+        <label for="scrub">Yarış vaxtı</label>
+        <input type="range" id="scrub" min="0" max="1" step="1" value="0">
+      </section>
+
+      <section class="card">
+        <h2>Pit proqnozu</h2>
+        <label for="pitLoss">Pit itkisi: <b id="pitLossOut">22</b> san</label>
+        <input type="range" id="pitLoss" min="14" max="32" step="1" value="22">
+        <div id="pitOut" aria-live="polite">
+          <p>Sürücünü dairədən və ya siyahıdan seçin.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Sıralama</h2>
+        <ol id="board"></ol>
+      </section>
+
+      <section class="card">
+        <details>
+          <summary>Dairəni necə oxumalı?</summary>
+          <p>Yuxarıdakı yarış bayrağı liderin yeridir. Hər sürücü liderdən nə qədər <b>geridədirsə</b>, o qədər saat əqrəbinin <b>əksinə</b> yerləşir. Tam dairə bir dövrə vaxtıdır (mərkəzdəki “Reference lap”).</p>
+          <p>Siferblatdakı rəqəmlər saniyədir. Məsələn “30” liderdən 30 saniyə geri deməkdir.</p>
+          <p>Bir sürücünü seçsəniz, bütün etiketlər ona nisbətən fərqi göstərir (“+” geridə, “−” öndə). Bənövşəyi qövs və qırıq dairə həmin sürücü <b>indi pit etsə</b> harada geri qayıdacağını göstərir.</p>
+        </details>
+      </section>
+
+    </aside>
+  </main>
+</div>
+
+<script>
+'use strict';
+
+/* ==========================================================================
+   1) SABİTLƏR
+   ========================================================================== */
+
+const SVG_NS = 'http://www.w3.org/2000/svg';   // SVG elementlərini yaratmaq üçün "ad sahəsi"
+
+// Dairənin həndəsəsi (viewBox 920x920 daxilində)
+const CX = 460, CY = 460;      // mərkəz nöqtəsi
+const R = 290;                 // dairənin radiusu (sürücü nöqtələri burada)
+const LABEL_R = 352;           // etiketlərin dairənin mərkəzindən məsafəsi
+const LAB_W = 62, LAB_H = 40;  // etiket qutusunun ölçüsü
+
+// Simulyasiya parametrləri
+const TOTAL_LAPS = 52;
+const BASE_LAP = 92.0;         // "ideal" dövrə vaxtı (saniyə)
+
+const API = 'https://api.openf1.org/v1';  // OpenF1 ünvanı
+
+/* Sürücü cədvəli: [kod, ad, komanda, rəng, komandanın uydurma sürət əlavəsi (san/dövrə)]
+   Sürət əlavələri YALNIZ DEMO üçündür, real performans deyil. */
+const GRID = [
+  ['RUS','George Russell','Mercedes','#27f4d2',0.00],
+  ['ANT','Kimi Antonelli','Mercedes','#27f4d2',0.00],
+  ['NOR','Lando Norris','McLaren','#ff8000',0.15],
+  ['PIA','Oscar Piastri','McLaren','#ff8000',0.15],
+  ['LEC','Charles Leclerc','Ferrari','#e8002d',0.30],
+  ['HAM','Lewis Hamilton','Ferrari','#e8002d',0.30],
+  ['VER','Max Verstappen','Red Bull','#3671c6',0.45],
+  ['HAD','Isack Hadjar','Red Bull','#3671c6',0.45],
+  ['ALB','Alexander Albon','Williams','#2f9bff',0.95],
+  ['SAI','Carlos Sainz','Williams','#2f9bff',0.95],
+  ['LAW','Liam Lawson','Racing Bulls','#7b8cff',1.15],
+  ['LIN','Arvid Lindblad','Racing Bulls','#7b8cff',1.15],
+  ['GAS','Pierre Gasly','Alpine','#ff87bc',1.35],
+  ['COL','Franco Colapinto','Alpine','#ff87bc',1.35],
+  ['ALO','Fernando Alonso','Aston Martin','#229971',1.55],
+  ['STR','Lance Stroll','Aston Martin','#229971',1.55],
+  ['OCO','Esteban Ocon','Haas','#a4a9ae',1.45],
+  ['BEA','Oliver Bearman','Haas','#a4a9ae',1.45],
+  ['HUL','Nico Hülkenberg','Audi','#d6003b',1.75],
+  ['BOR','Gabriel Bortoleto','Audi','#d6003b',1.75],
+  ['PER','Sergio Pérez','Cadillac','#dfe3e8',2.15],
+  ['BOT','Valtteri Bottas','Cadillac','#dfe3e8',2.15],
+];
+
+// Təkər növləri: off = bir dövrəlik sürət fərqi, deg = hər dövrədə köhnəlmə (san)
+const COMPOUND = {
+  S: { off:-0.45, deg:0.075 },   // Soft: sürətli amma tez yeyilir
+  M: { off: 0.00, deg:0.045 },   // Medium
+  H: { off: 0.40, deg:0.028 },   // Hard: yavaş amma dayanıqlı
+};
+
+/* ==========================================================================
+   2) KÖMƏKÇİ FUNKSİYALAR
+   ========================================================================== */
+
+const $ = sel => document.querySelector(sel);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+
+// 3725 saniyə -> "01:02:05"
+function fmtClock(s){
+  s = Math.max(0, Math.floor(s));
+  return pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60);
+}
+// 83.484 saniyə -> "1:23.484"
+function fmtLap(s){
+  const m = Math.floor(s / 60);
+  return m + ':' + (s - m * 60).toFixed(3).padStart(6, '0');
+}
+
+/* Seed-lənən təsadüfi say generatoru (mulberry32).
+   Math.random() hər dəfə fərqli nəticə verir. Bu isə eyni "seed" ilə eyni ardıcıllığı
+   verir, yəni eyni seed = eyni yarış. Bu həm sınaq, həm də "Yeni yarış" düyməsi üçün yaxşıdır. */
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;   // 0 ilə 1 arasında
+  };
+}
+
+/* ==========================================================================
+   3) SİMULYATOR
+   --------------------------------------------------------------------------
+   Çıxış formatı (RACE obyekti) bütün proqramın "dilidir":
+     {
+       title, total (dövrə sayı),
+       drivers: [{ code, name, team, color, cum: [0, t1, t2, ...] }],
+       pitLaps: Map(kod -> Set(dövrə nömrələri)),
+       scLaps : Set(Safety Car dövrələri),
+       refByLap: [...], endTime
+     }
+   cum[n] = sürücünün n-ci dövrəni bitirdiyi an (yarış başlayandan saniyə ilə).
+   Yəni cum[0]=0, cum[1]=1-ci dövrənin sonu və s. Qalan HƏR ŞEY bu massivdən hesablanır.
+   ========================================================================== */
+function simulateRace(seed){
+  const rnd = mulberry32(seed);
+  const gauss = () => (rnd() + rnd() + rnd() - 1.5) * 2;   // təxminən normal paylanma (orta 0, sapma 1)
+  const L = TOTAL_LAPS;
+
+  // --- sürücüləri hazırla ---
+  const ds = GRID.map(g => ({
+    code:g[0], name:g[1], team:g[2], color:g[3],
+    pace: g[4] + (rnd() - 0.5) * 0.7,        // komanda səviyyəsi + fərdi təsadüfilik
+    cum:[0], dnfLap:null,
+  }));
+
+  // --- start şəbəkəsi: sürət + təsadüfi "qualifying" səhvi ilə sıralayırıq ---
+  const q = ds.map(d => d.pace + gauss() * 0.35);
+  const gridOrder = ds.map((_, i) => i).sort((a, b) => q[a] - q[b]);
+  gridOrder.forEach((idx, slot) => { ds[idx].grid = slot; });
+
+  // --- strategiya: 1 və ya 2 pit-stop, hər stint üçün təkər növü ---
+  for(const d of ds){
+    if(rnd() < 0.6){
+      d.stops = [13 + Math.floor(rnd() * 14)];
+      d.compounds = rnd() < 0.5 ? ['M','H'] : ['S','H'];
+    } else {
+      const s1 = 10 + Math.floor(rnd() * 10);
+      d.stops = [s1, s1 + 14 + Math.floor(rnd() * 12)];
+      d.compounds = rnd() < 0.5 ? ['S','M','H'] : ['M','H','M'];
+    }
+  }
+
+  // --- hadisə: orta pillədən biri qəzaya düşür, Safety Car çıxır ---
+  const byPace = ds.map((_, i) => i).sort((a, b) => ds[a].pace - ds[b].pace);
+  const dnfDriver = ds[byPace[6 + Math.floor(rnd() * (ds.length - 6))]];
+  dnfDriver.dnfLap = 24 + Math.floor(rnd() * 14);
+  const scFirst = dnfDriver.dnfLap + 1;
+  const scLaps = new Set([scFirst, scFirst + 1, scFirst + 2]);
+
+  const pitLaps = new Map(ds.map(d => [d.code, new Set()]));
+  const stintNo = ds.map(() => 0);       // hazırda neçənci stintdədir
+  const stintStart = ds.map(() => 1);    // stintin başladığı dövrə
+
+  // --- dövrə-dövrə simulyasiya ---
+  for(let n = 1; n <= L; n++){
+    const sc = scLaps.has(n);
+
+    // Hələ yarışda olan sürücülər, əvvəlki dövrənin sonundakı vaxta görə sıralı.
+    const active = ds.map((_, i) => i)
+      .filter(i => ds[i].cum.length === n && !(ds[i].dnfLap && n > ds[i].dnfLap))
+      .sort((a, b) => n === 1 ? ds[a].grid - ds[b].grid : ds[a].cum[n-1] - ds[b].cum[n-1]);
+
+    let prevEnd = null;   // qabaqdakı (pitdə olmayan) maşının bu dövrəni bitirmə anı
+
+    for(const i of active){
+      const d = ds[i];
+      const prevT = d.cum[n-1];
+
+      // Pit qərarı: plan üzrə, ya da Safety Car altında ucuz pit
+      let pit = false;
+      if(n < L && stintNo[i] < d.stops.length){
+        if(d.stops[stintNo[i]] === n) pit = true;
+        else if(sc && (n === scFirst || n === scFirst + 1) && d.stops[stintNo[i]] > n && rnd() < 0.5) pit = true;
+      }
+      const comp = COMPOUND[d.compounds[stintNo[i]]];
+      const stintLap = n - stintStart[i];
+
+      let pitLoss = 0;
+      if(pit){
+        pitLoss = sc ? 10.5 + rnd() : 21.5 + rnd() * 1.2 + (rnd() < 0.08 ? 3 + rnd() * 4 : 0);
+        pitLaps.get(d.code).add(n);
+        stintNo[i]++; stintStart[i] = n + 1;
+      }
+
+      // Normal dövrə vaxtı
+      let raw = BASE_LAP + d.pace + comp.off + comp.deg * stintLap   // sürət + təkər köhnəlməsi
+              - 0.035 * n                                             // yanacaq azalır, maşın yüngülləşir
+              + gauss() * 0.22;                                       // təsadüfi dəyişmə
+      if(n === 1) raw += 5.5 + d.grid * 0.2;                          // yerindən start + start şəbəkəsi
+      if(pit) raw += pitLoss;
+
+      let end;
+      if(sc){
+        // Safety Car: hamı yavaşlayır, aradakı boşluq dövrədə ən çox 7 san azala bilər
+        const scLap = BASE_LAP * 1.5;
+        end = prevEnd === null ? prevT + scLap : Math.max(prevEnd + 0.9, prevT + scLap - 7);
+        if(pit) end += pitLoss;
+      } else {
+        end = prevT + raw;
+        // "Çirkli hava": qabaqdakıya 0.35 san-dən yaxınlaşa bilmirsən, ancaq ara-sıra ötürsən
+        if(prevEnd !== null && !pit && n > 1){
+          const minEnd = prevEnd + 0.35;
+          if(end < minEnd && rnd() > 0.28) end = minEnd + rnd() * 0.3;
+        }
+      }
+      d.cum.push(end);
+      if(!pit) prevEnd = end;
+    }
+  }
+
+  return finalizeRace({
+    title:'Simulyasiya (seed ' + seed + ')',
+    total:L,
+    drivers:ds.map(d => ({ code:d.code, name:d.name, team:d.team, color:d.color, cum:d.cum })),
+    pitLaps, scLaps,
+    baseLap:BASE_LAP + 1,
+  });
+}
+
+/* RACE obyektinə iki əlavə hesablayır (həm simulyasiya, həm OpenF1 üçün):
+   - refByLap[k]: k dövrə tamamlandıqdan sonra "reference lap" (liderin son 5 YAŞIL dövrəsinin orta vaxtı).
+     Safety Car və pit dövrələri sayılmır, çünki onlar normal sürəti əks etdirmir.
+   - endTime: bütün sürücülər bitirəndən sonra yarışın son anı. */
+function finalizeRace(race){
+  const greens = [];
+  const ref = [];
+  for(let n = 1; n <= race.total; n++){
+    let best = null;                       // n-ci dövrəni ən tez bitirən = həmin dövrənin lideri
+    for(const d of race.drivers) if(d.cum.length > n && (best === null || d.cum[n] < best.cum[n])) best = d;
+    if(best){
+      const lt = best.cum[n] - best.cum[n-1];
+      const isPit = race.pitLaps.get(best.code)?.has(n);
+      if(n > 1 && !race.scLaps.has(n) && !isPit) greens.push(lt);
+    }
+    const last = greens.slice(-5);
+    ref[n] = last.length ? last.reduce((a, b) => a + b, 0) / last.length : null;
+  }
+  const firstKnown = ref.find(v => v != null) ?? race.baseLap ?? 90;
+  for(let n = 1; n <= race.total; n++) if(ref[n] == null) ref[n] = (n > 1 && ref[n-1] != null) ? ref[n-1] : firstKnown;
+  ref[0] = ref[1];
+  race.refByLap = ref;
+  race.endTime = Math.max(...race.drivers.map(d => d.cum[d.cum.length - 1]));
+  return race;
+}
+
+/* ==========================================================================
+   4) OPENF1 (API)
+   --------------------------------------------------------------------------
+   API nədir? Application Programming Interface: proqramın başqa bir proqramdan
+   (serverdən) məlumat istəməsi üçün qaydadır. Brauzer bir ÜNVAN göndərir, server
+   JSON adlı mətn formatında cavab qaytarır. Misal:
+       https://api.openf1.org/v1/drivers?session_key=9158
+   OpenF1 pulsuz F1 API-sidir. Keçmiş yarışların məlumatı açıqdır, canlı sessiya
+   məlumatı isə hesab/token tələb edə bilər (saytın şərtlərinə baxın).
+
+   Bu faylda istifadə olunan "endpoint"lər (ünvanın son hissəsi):
+     /sessions      hansı yarışlar var (session_key verir)
+     /drivers       sürücü kodu, adı, komanda rəngi
+     /laps          hər sürücünün hər dövrə vaxtı və başlama anı
+     /pit           pit-stop dövrələri
+     /race_control  Safety Car və bayraq mesajları
+     /intervals     (canlı) liderdən olan fərq, təxminən hər 4 saniyədə
+   ========================================================================== */
+
+// Bir ünvanı çəkir və JSON qaytarır. 429 ("çox sorğu") gəlsə, gözləyib təkrar cəhd edir.
+async function getJSON(path){
+  const headers = {};
+  const tok = $('#token').value.trim();
+  if(tok) headers.Authorization = 'Bearer ' + tok;   // token varsa ona əlavə edirik
+  for(let attempt = 0; attempt < 3; attempt++){
+    const res = await fetch(API + path, { headers });
+    if(res.status === 429){ await sleep(1200 * (attempt + 1)); continue; }
+    if(!res.ok){
+      const e = new Error('HTTP ' + res.status);
+      e.status = res.status;
+      e.body = (await res.text().catch(() => '')).slice(0, 160);
+      throw e;
+    }
+    const data = await res.json();
+    if(!Array.isArray(data)) throw new Error('Gözlənilməyən cavab: ' + JSON.stringify(data).slice(0, 120));
+    return data;
+  }
+  const e = new Error('HTTP 429'); e.status = 429; throw e;
+}
+
+// Xəta obyektini istifadəçiyə anlaşıqlı mesaja çevirir
+function explainError(e){
+  if(e.status === 401 || e.status === 403) return 'Giriş icazəsi yoxdur (' + e.status + '). Canlı data üçün token lazım ola bilər.';
+  if(e.status === 429) return 'Çox sorğu göndərildi (429). Bir az gözləyib yenidən cəhd edin.';
+  if(e.status === 404) return 'Bu filtrlə məlumat tapılmadı (404).';
+  if(e instanceof TypeError) return 'Şəbəkə/CORS xətası. İnternet yoxdur və ya brauzer sorğunu blokladı. Faylı birbaşa açmaq əvəzinə "python -m http.server" ilə açın.';
+  return e.message + (e.body ? ' — ' + e.body : '');
+}
+
+/* Race-control mesajlarından Safety Car dövrələrini çıxarır.
+   Mesajlar "SAFETY CAR DEPLOYED", "SAFETY CAR IN THIS LAP" kimi mətnlərdir,
+   ona görə mətn axtarışı ilə başlanğıc və bitişi tapırıq. */
+function parseScLaps(rc, total){
+  const set = new Set();
+  let start = null;
+  const rows = [...rc].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  for(const r of rows){
+    const msg = String(r.message || '').toUpperCase();
+    const lap = r.lap_number;
+    if(!lap) continue;
+    if(r.category === 'SafetyCar' || msg.includes('SAFETY CAR')){
+      if(/DEPLOYED/.test(msg)){ if(start === null) start = lap; }
+      else if(/IN THIS LAP|ENDING/.test(msg) && start !== null){
+        for(let n = start; n <= lap; n++) set.add(n);
+        start = null;
+      }
+    }
+  }
+  if(start !== null) for(let n = start; n <= Math.min(total, start + 3); n++) set.add(n);
+  return set;
+}
+
+/* OpenF1 cavablarını bizim RACE formatına çevirir.
+   Əsas fikir: hər dövrənin bitişi = növbəti dövrənin date_start vaxtı.
+   Bütün sürücülər üçün eyni T0-dan (ilk dövrənin ən erkən başlanğıcı) ölçürük,
+   beləliklə sürücülər arasındakı fərq düzgün çıxır.
+   Qeyd: bu, dövrə sonlarına görə dəqiqlikdir. Dövrə daxilində xətti interpolyasiya edirik. */
+function buildRaceFromOpenF1(drv, laps, pits, rc, title){
+  const info = new Map();
+  for(const d of drv) info.set(d.driver_number, d);
+
+  const byDrv = new Map();
+  for(const r of laps){
+    if(r.lap_number == null) continue;
+    if(!byDrv.has(r.driver_number)) byDrv.set(r.driver_number, new Map());
+    byDrv.get(r.driver_number).set(r.lap_number, r);
+  }
+
+  let t0 = Infinity;
+  for(const m of byDrv.values()){
+    const r = m.get(1);
+    if(r && r.date_start) t0 = Math.min(t0, Date.parse(r.date_start));
+  }
+  const durs = laps.map(r => r.lap_duration).filter(x => x > 40 && x < 200).sort((a, b) => a - b);
+  const med = durs.length ? durs[Math.floor(durs.length / 2)] : 90;
+
+  let total = 0;
+  for(const m of byDrv.values()) for(const n of m.keys()) total = Math.max(total, n);
+  if(!total) throw new Error('Bu yarış üçün dövrə məlumatı yoxdur.');
+
+  const drivers = [];
+  for(const [num, m] of byDrv){
+    const meta = info.get(num) || {};
+    const maxLap = Math.max(...m.keys());
+    const cum = [0];
+    for(let n = 1; n <= maxLap; n++){
+      const cur = m.get(n), nxt = m.get(n + 1);
+      // Son dövrədə vaxt yoxdursa, sürücü həmin dövrədə çıxıb: onu tamamlanmış saymırıq.
+      if(!nxt && !(cur && cur.lap_duration > 0)) break;
+      let end = null;
+      if(nxt && nxt.date_start && isFinite(t0)) end = (Date.parse(nxt.date_start) - t0) / 1000;
+      if(end === null || !(end > cum[n - 1])){
+        const dur = (cur && cur.lap_duration > 0) ? cur.lap_duration : (n === 1 ? med + 6 : med);
+        end = cum[n - 1] + dur;
+      }
+      cum.push(end);
+    }
+    drivers.push({
+      code: meta.name_acronym || ('#' + num),
+      name: meta.full_name || ('Sürücü ' + num),
+      team: meta.team_name || '',
+      color: meta.team_colour ? '#' + meta.team_colour : '#888888',
+      cum, num,
+    });
+  }
+
+  const pitLaps = new Map(drivers.map(d => [d.code, new Set()]));
+  for(const p of pits){
+    const d = drivers.find(x => x.num === p.driver_number);
+    if(d && p.lap_number) pitLaps.get(d.code).add(p.lap_number);
+  }
+
+  return finalizeRace({
+    title, total, drivers, pitLaps,
+    scLaps: parseScLaps(rc, total),
+    baseLap: med,
+  });
+}
+
+// Keçmiş yarışı yükləyir (4 sorğu, aralarında qısa fasilə ilə, çünki OpenF1 sorğu sayını məhdudlaşdırır)
+async function loadReplay(sessionKey, title){
+  const k = encodeURIComponent(sessionKey);
+  setMsg('Sürücülər yüklənir (1/4)…');
+  const drv = await getJSON('/drivers?session_key=' + k);
+  await sleep(400);
+  setMsg('Dövrə vaxtları yüklənir (2/4)…');
+  const laps = await getJSON('/laps?session_key=' + k);
+  await sleep(400);
+  setMsg('Pit-stoplar yüklənir (3/4)…');
+  const pits = await getJSON('/pit?session_key=' + k);
+  await sleep(400);
+  setMsg('Safety Car mesajları yüklənir (4/4)…');
+  const rc = await getJSON('/race_control?session_key=' + k);
+  return buildRaceFromOpenF1(drv, laps, pits, rc, title);
+}
+
+/* ---- CANLI REJİM ----
+   Təkrardan fərqi: bütün tarixçə yoxdur, hər 7 saniyədə "indi" nə baş verir sualını veririk.
+   Liderdən fərqi hazır /intervals endpoint-i verir (gap_to_leader), biz birbaşa FRAME qururuq. */
+const live = { timer:null, info:null, rc:[], rcAt:0, frame:null, busy:false };
+
+// Hazırda Safety Car varmı? Mesajları vaxt sırasına görə oxuyub son vəziyyəti tapırıq.
+function scActiveNow(rc){
+  let active = false;
+  const rows = [...rc].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  for(const r of rows){
+    const msg = String(r.message || '').toUpperCase();
+    if(/DEPLOYED/.test(msg) && msg.includes('SAFETY CAR')) active = true;
+    else if(/IN THIS LAP|ENDING/.test(msg) && msg.includes('SAFETY CAR')) active = false;
+    else if(r.flag === 'GREEN' || r.flag === 'CLEAR') active = false;
+  }
+  return active;
+}
+
+function buildLiveFrame(info, iv, laps, rc){
+  // hər sürücü üçün ən son interval qeydi
+  const latest = new Map();
+  for(const r of iv){
+    const prev = latest.get(r.driver_number);
+    if(!prev || String(r.date) > String(prev.date)) latest.set(r.driver_number, r);
+  }
+  // reference lap: son dövrələrin ən sürətli 60%-nin ortası (pit/SC dövrələri atılır)
+  const durs = laps.map(l => l.lap_duration).filter(x => x > 40 && x < 300).sort((a, b) => a - b);
+  const keep = durs.slice(0, Math.max(1, Math.ceil(durs.length * 0.6)));
+  const ref = keep.length ? keep.reduce((a, b) => a + b, 0) / keep.length : 90;
+  const lapNo = laps.reduce((m, l) => Math.max(m, l.lap_number || 0), 0) || 1;
+
+  const rows = [];
+  for(const [num, r] of latest){
+    const meta = info.get(num) || {};
+    let gap = 0, lapsDown = 0;
+    const g = r.gap_to_leader;                    // ədəd, "+1 LAP" kimi mətn, ya da null (lider)
+    if(typeof g === 'number') gap = g;
+    else if(typeof g === 'string'){
+      const m = g.match(/(\d+)\s*L/i);
+      if(m){ lapsDown = +m[1]; gap = lapsDown * ref; }
+      else if(!isNaN(parseFloat(g))) gap = parseFloat(g);
+    }
+    rows.push({
+      code: meta.name_acronym || ('#' + num), name: meta.full_name || '',
+      color: meta.team_colour ? '#' + meta.team_colour : '#888888',
+      gap, lapsDown, out:false, inPit:false,
+    });
+  }
+  rows.sort((a, b) => a.lapsDown - b.lapsDown || a.gap - b.gap);
+  rows.forEach((r, i) => { r.pos = i + 1; });
+  return { lap:lapNo, total:null, status:scActiveNow(rc) ? 'SC' : 'GREEN', ref, T:Date.now() / 1000, drivers:rows };
+}
+
+async function pollLive(){
+  if(live.busy) return;
+  live.busy = true;
+  try{
+    if(!live.info){
+      const drv = await getJSON('/drivers?session_key=latest');
+      live.info = new Map(drv.map(d => [d.driver_number, d]));
+    }
+    // "date>..." OpenF1-də filtr sintaksisidir: bu tarixdən sonrakı qeydlər
+    const since = new Date(Date.now() - 45000).toISOString();
+    const iv = await getJSON('/intervals?session_key=latest&date>' + since);
+    if(!iv.length){
+      setMsg('Son 45 saniyədə yeni məlumat yoxdur. Hazırda canlı sessiya getmir ola bilər.', 'err');
+      return;
+    }
+    await sleep(350);
+    const laps = await getJSON('/laps?session_key=latest&date_start>' + new Date(Date.now() - 600000).toISOString());
+    if(Date.now() - live.rcAt > 30000){
+      await sleep(350);
+      live.rc = await getJSON('/race_control?session_key=latest');
+      live.rcAt = Date.now();
+    }
+    const frame = buildLiveFrame(live.info, iv, laps, live.rc);
+    if(!live.frame || live.frame.drivers.map(d => d.code).join() !== frame.drivers.map(d => d.code).join()){
+      buildStage({ drivers: frame.drivers });     // sürücü dəsti dəyişibsə, səhnəni yenidən qur
+      buildBoard(frame.drivers);
+    }
+    live.frame = frame;
+    setMsg('Canlı: ' + new Date().toLocaleTimeString() + ' tarixində yeniləndi.', 'ok');
+  }catch(e){
+    setMsg(explainError(e), 'err');
+  }finally{
+    live.busy = false;
+  }
+}
+function startLive(){
+  stopLive();
+  live.info = null; live.frame = null;
+  setMsg('Canlı məlumat gözlənilir…');
+  pollLive();
+  live.timer = setInterval(pollLive, 7000);
+}
+function stopLive(){ if(live.timer){ clearInterval(live.timer); live.timer = null; } }
+
+/* ==========================================================================
+   5) FRAME HESABLAYICI
+   --------------------------------------------------------------------------
+   Sual: yarışın T-ci saniyəsində hər sürücü harada və liderdən neçə saniyə geridədir?
+   ========================================================================== */
+
+/* progressAt: T anında sürücünün neçə dövrə getdiyini kəsrlə qaytarır (məs. 12.37).
+   cum = [0, 92.1, 183.9, ...]. Binar axtarışla T-nin hansı iki dövrə sonu arasında
+   olduğunu tapır, sonra xətti interpolyasiya edir. */
+function progressAt(cum, T){
+  const last = cum.length - 1;
+  if(T >= cum[last]) return last;
+  let lo = 0, hi = last;
+  while(lo < hi - 1){
+    const mid = (lo + hi) >> 1;
+    if(cum[mid] <= T) lo = mid; else hi = mid;
+  }
+  return lo + (T - cum[lo]) / (cum[lo + 1] - cum[lo]);
+}
+
+/* timeAt: progressAt-ın tərsi. "Sürücü p dövrəyə neçənci saniyədə çatıb?" */
+function timeAt(cum, p){
+  const last = cum.length - 1;
+  if(p >= last) return cum[last];
+  const k = Math.floor(p);
+  return cum[k] + (p - k) * (cum[k + 1] - cum[k]);
+}
+
+/* computeFrame: T anının "şəkli" (frame).
+   Fərqin hesablanması: sürücü d, liderin 3.4 dövrədə olduğu yerdə 3.1 dövrədədir.
+   Lider 3.1 dövrəyə vaxt X-də çatmışdı. İndi T-dir. Deməli fərq = T - X saniyə.
+   Yəni "lider bu nöqtədən nə qədər əvvəl keçib?". */
+function computeFrame(race, T){
+  const rows = race.drivers.map(d => ({ d, p: progressAt(d.cum, T) }));
+  let L = rows[0];
+  // lider = ən çox yol gedən. Hamı bitiribsə (p bərabərdir), finişə ƏN TEZ gələn qalibdir.
+  const fin = r => r.d.cum[r.d.cum.length - 1];
+  for(const r of rows) if(r.p > L.p || (r.p === L.p && fin(r) < fin(L))) L = r;
+
+  const total = race.total;
+  const lapsDone = Math.floor(L.p + 1e-9);
+  const lapNo = clamp(lapsDone + 1, 1, total);
+  const leaderLast = L.d.cum.length - 1;
+  const finished = leaderLast >= total && T >= L.d.cum[leaderLast];
+  const ref = race.refByLap[clamp(lapsDone, 0, total)];
+  const status = finished ? 'FINISHED' : (race.scLaps.has(lapNo) ? 'SC' : 'GREEN');
+
+  const out = rows.map(r => {
+    const d = r.d;
+    const last = d.cum.length - 1;
+    const tEff = Math.min(T, d.cum[last]);                    // bitirmiş/çıxmış sürücünün saatı dayanır
+    const gap = Math.max(0, tEff - timeAt(L.d.cum, r.p));
+    const lapsDown = Math.floor(L.p - r.p + 1e-9);            // neçə TAM dövrə geridədir
+    const retired = last < total - 2 && T >= d.cum[last];
+    // Pitdədir? Pit dövrəsinin son 20%-i ərzində (pit xəttində olduğu an)
+    const lapIdx = Math.floor(r.p) + 1;
+    const frac = r.p - Math.floor(r.p);
+    const inPit = !retired && !finished && frac > 0.8 && !!race.pitLaps.get(d.code)?.has(lapIdx);
+    return { code:d.code, name:d.name, color:d.color, p:r.p, gap, lapsDown, out:retired, inPit };
+  });
+
+  // Mövqe: ən çox yol gedən öndədir; bərabərlikdə fərqi az olan. Çıxanlar siyahının sonuna.
+  const active = out.filter(r => !r.out).sort((a, b) => b.p - a.p || a.gap - b.gap);
+  const gone = out.filter(r => r.out);
+  active.forEach((r, i) => { r.pos = i + 1; });
+  gone.forEach((r, i) => { r.pos = active.length + i + 1; });
+
+  return { lap:lapNo, total, status, ref, T, drivers:[...active, ...gone] };
+}
+
+/* ==========================================================================
+   6) PİT PROQNOZU
+   --------------------------------------------------------------------------
+   "Sürücü indi pit etsə nə olar?" Pit xətti ~22 saniyə itirdir, yəni liderdən
+   olan fərqi (gap) 22 artır. Yeni fərqdən daha kiçik fərqi olan hər kəs onun
+   qabağında qalır. Beləliklə yeni mövqeyi və qayıdacağı "trafiki" tapırıq.
+   ========================================================================== */
+function pitPrediction(frame, sel, loss){
+  if(!sel || sel.out) return null;
+  const newGap = sel.gap + loss;
+  const others = frame.drivers.filter(r => r !== sel && !r.out);
+  const ahead = others.filter(r => r.gap < newGap);
+  const behind = others.filter(r => r.gap >= newGap);
+  const carAhead = ahead.length ? ahead.reduce((a, b) => b.gap > a.gap ? b : a) : null;
+  const carBehind = behind.length ? behind.reduce((a, b) => b.gap < a.gap ? b : a) : null;
+  return { newGap, pos:ahead.length + 1, carAhead, carBehind, loss };
+}
+
+/* ==========================================================================
+   7) ÇƏKİM (SVG)
+   ========================================================================== */
+
+// SVG elementi yaradır: el('circle', {r:5, fill:'red'}, valideyn)
+function el(tag, attrs, parent){
+  const e = document.createElementNS(SVG_NS, tag);
+  for(const k in attrs) e.setAttribute(k, attrs[k]);
+  if(parent) parent.appendChild(e);
+  return e;
+}
+
+// Bucaq (dərəcə, yuxarıdan saat əqrəbi istiqamətində) -> ekran koordinatı
+function polar(deg, r){
+  const a = deg * Math.PI / 180;
+  return { x: CX + r * Math.sin(a), y: CY - r * Math.cos(a) };
+}
+
+/* Fərq -> bucaq. Geri qalmaq = saat əqrəbinin ƏKSİNƏ getmək, ona görə mənfi.
+   gap % ref : 1 dövrədən çox geri qalan (lapped) sürücü dairəni "dolanır". */
+function angleOf(gap, ref){
+  const frac = (gap % ref) / ref;
+  return ((-frac * 360) % 360 + 360) % 360;
+}
+
+const S = { views:new Map(), tickKey:null };   // səhnədəki elementlərə istinadlar
+
+// Səhnəni (dairə, mətnlər, hər sürücünün qrupu) bir dəfə qurur. Sonra yalnız atributlar yenilənir.
+function buildStage(race){
+  const svg = $('#ring');
+  svg.textContent = '';                         // köhnə məzmunu sil
+  S.views.clear(); S.tickKey = null;
+
+  el('circle', { class:'ring-base', cx:CX, cy:CY, r:R }, svg);
+  S.ticks = el('g', {}, svg);
+
+  // Start/finiş bayrağı (dairənin yuxarısında, daxildə)
+  const flag = el('g', { transform:`translate(${CX - 16} ${CY - R + 8})` }, svg);
+  for(let r = 0; r < 2; r++) for(let c = 0; c < 5; c++){
+    el('rect', { x:c * 6.4, y:r * 6.4, width:6.4, height:6.4, fill:(r + c) % 2 ? 'var(--fg)' : 'var(--panel)', stroke:'var(--ring)', 'stroke-width':.5 }, flag);
+  }
+
+  S.pitArc = el('path', { class:'pit-arc', d:'' }, svg);
+  S.ghost = el('circle', { class:'ghost', r:13, display:'none' }, svg);
+  S.ghostT = el('text', { class:'ghost-t', display:'none' }, svg);
+
+  // Mərkəz mətnləri
+  S.lap = el('text', { class:'t-lap', x:CX, y:CY - 8 }, svg);
+  S.pill = el('text', { class:'pill GREEN', x:CX, y:CY + 38 }, svg);
+  S.refT = el('text', { class:'t-ref', x:CX, y:CY + 76 }, svg);
+  S.info = el('text', { class:'t-info', x:CX, y:CY + 106 }, svg);
+  S.pitT = el('text', { class:'t-pit', x:CX, y:CY + 138 }, svg);
+
+  // Sürücülər. Hər biri üçün: bağlayıcı xətt, halqa (seçim), nöqtə, etiket qutusu
+  S.layer = el('g', {}, svg);
+  for(const d of race.drivers){
+    const g = el('g', { class:'drv', tabindex:'0', role:'button', 'aria-label':(d.name || d.code) }, S.layer);
+    const line = el('line', { class:'conn' }, g);
+    const halo = el('circle', { class:'halo', r:17 }, g);
+    const dot = el('circle', { class:'dot', r:7, fill:d.color }, g);
+    const lab = el('g', { class:'lab' }, g);
+    const rect = el('rect', { x:-LAB_W / 2, y:-LAB_H / 2, width:LAB_W, height:LAB_H, rx:6, stroke:d.color }, lab);
+    const t1 = el('text', { class:'lc', y:-3 }, lab); t1.textContent = d.code;
+    const t2 = el('text', { class:'lg', y:14 }, lab);
+    g.addEventListener('click', () => select(d.code));
+    g.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); select(d.code); } });
+    S.views.set(d.code, { g, line, halo, dot, lab, t2 });
+  }
+  if(state.selected && S.views.has(state.selected)) S.layer.appendChild(S.views.get(state.selected).g);
+}
+
+// Dairənin içindəki saniyə şkalası (hər 10 saniyədən bir). Yalnız "ref" dəyişəndə yenilənir.
+function drawTicks(ref){
+  const key = Math.round(ref * 2);
+  if(S.tickKey === key) return;
+  S.tickKey = key;
+  S.ticks.textContent = '';
+  for(let s = 10; s < ref - 4; s += 10){
+    const a = 360 - (s / ref) * 360;
+    const p1 = polar(a, R - 4), p2 = polar(a, R - 16), pt = polar(a, R - 34);
+    el('line', { class:'tick', x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y }, S.ticks);
+    const t = el('text', { class:'tick-t', x:pt.x, y:pt.y }, S.ticks);
+    t.textContent = s;
+  }
+}
+
+/* Etiketlərin üst-üstə düşməsinin qarşısı.
+   Nöqtələr dairədə çox yaxın ola bilər (məs. 10 maşın 20 saniyənin içində). Etiketlər isə
+   böyükdür. Ona görə etiketin bucağını nöqtənin bucağından ayırırıq.
+
+   Alqoritm (izotonik reqressiya, "PAV" üsulu):
+     - Bucaqlara görə sıralayırıq. Qonşu etiketlər arasında minimum məsafə s_k lazımdır.
+     - c_k = s_1 + ... + s_k yığımını çıxsaq (y_k = x_k - c_k), "məsafə şərti" sadə bir
+       şərtə çevrilir: y artmayan olmamalıdır.
+     - Hər etiketi öz nöqtəsinə mümkün qədər yaxın saxlamaqla bu şərti ödəyən ən yaxın
+       cavabı PAV tapır: şərti pozan qonşuları bir blokda birləşdirib ortalaması alınır.
+     - Dairəni ən böyük boşluqdan "kəsib" düz xəttə çeviririk ki, 360°-dən 0°-ə keçid problem yaratmasın. */
+function layoutLabels(items){
+  const n = items.length;
+  const sorted = items.slice().sort((a, b) => a.ang - b.ang);
+  if(n < 2){ sorted.forEach(it => { it.lab = it.ang; }); return; }
+
+  // 1) ən böyük boşluğu tap, dairəni orada kəs
+  let cut = 0, bestGap = -1;
+  for(let i = 0; i < n; i++){
+    const g = ((sorted[(i + 1) % n].ang - sorted[i].ang) % 360 + 360) % 360;
+    if(g > bestGap){ bestGap = g; cut = (i + 1) % n; }
+  }
+  const seq = sorted.slice(cut).concat(sorted.slice(0, cut));
+  const x = [seq[0].ang];
+  for(let k = 1; k < n; k++){
+    let a = seq[k].ang;
+    while(a < x[k - 1]) a += 360;                 // bucaqları artan düzgün sıraya gətir
+    x.push(a);
+  }
+
+  // 2) və 3) Qonşular arasındakı minimum bucaq etiketin YENİ yerindəki istiqamətdən asılıdır,
+  //    yeni yer isə hələ bilinmir. Ona görə cavabı bir neçə dəfə təkrar dəqiqləşdiririk.
+  const ext = a => { const r = a * Math.PI / 180; return LAB_W * Math.abs(Math.cos(r)) + LAB_H * Math.abs(Math.sin(r)); };
+  let lab = x.slice();
+  for(let round = 0; round < 8; round++){
+    // c[k] = ilk etiketdən k-cıya qədər tələb olunan minimum bucaq cəmi
+    const c = [0];
+    for(let k = 1; k < n; k++){
+      const need = ((ext(lab[k - 1]) + ext(lab[k])) / 2 / LABEL_R) * 180 / Math.PI * 1.08;
+      c.push(c[k - 1] + need);
+    }
+    // PAV: y_k = x_k - c_k üçün qeyri-azalan ən yaxın ardıcıllıq
+    const blocks = [];
+    for(let k = 0; k < n; k++){
+      blocks.push({ sum:x[k] - c[k], cnt:1 });
+      while(blocks.length > 1){
+        const b = blocks[blocks.length - 1], a = blocks[blocks.length - 2];
+        if(a.sum / a.cnt <= b.sum / b.cnt) break;
+        a.sum += b.sum; a.cnt += b.cnt; blocks.pop();
+      }
+    }
+    let k = 0;
+    for(const b of blocks){
+      const y = b.sum / b.cnt;
+      for(let j = 0; j < b.cnt; j++, k++) lab[k] = y + c[k];
+    }
+  }
+  seq.forEach((it, k) => { it.lab = lab[k]; });
+}
+
+// Etiketdə görünən mətn
+function gapText(r, sel){
+  if(r.out) return 'OUT';
+  if(r.inPit) return 'PIT';
+  if(sel && r === sel) return 'P' + r.pos;
+  if(sel){                                    // seçilmiş sürücüyə nisbətən
+    const relLaps = r.lapsDown - sel.lapsDown;
+    if(relLaps !== 0) return (relLaps > 0 ? '+' : '−') + Math.abs(relLaps) + 'L';
+    const rel = r.gap - sel.gap;
+    return (rel >= 0 ? '+' : '−') + Math.abs(rel).toFixed(1);
+  }
+  if(r.pos === 1) return 'LEAD';
+  if(r.lapsDown > 0) return '+' + r.lapsDown + 'L';
+  return '+' + r.gap.toFixed(1);
+}
+
+const STATUS_TEXT = { GREEN:'Track Clear', SC:'Safety Car', FINISHED:'Finished' };
+
+// Hər kadrda çağırılır: frame-i ekrana çəkir
+function draw(f){
+  const svg = $('#ring');
+  svg.classList.toggle('sc', f.status === 'SC');
+  drawTicks(f.ref);
+
+  const sel = f.drivers.find(r => r.code === state.selected) || null;
+  const items = f.drivers.map(r => ({ r, ang: angleOf(r.gap, f.ref) }));
+  layoutLabels(items);
+
+  for(const it of items){
+    const v = S.views.get(it.r.code);
+    if(!v) continue;
+    const dp = polar(it.ang, R);
+    const lp = polar(it.lab, LABEL_R);
+    const lc = polar(it.lab, LABEL_R - 24);
+    v.dot.setAttribute('cx', dp.x); v.dot.setAttribute('cy', dp.y);
+    v.halo.setAttribute('cx', dp.x); v.halo.setAttribute('cy', dp.y);
+    v.line.setAttribute('x1', dp.x); v.line.setAttribute('y1', dp.y);
+    v.line.setAttribute('x2', lc.x); v.line.setAttribute('y2', lc.y);
+    v.lab.setAttribute('transform', `translate(${lp.x.toFixed(1)} ${lp.y.toFixed(1)})`);
+    v.t2.textContent = gapText(it.r, sel);
+    v.g.classList.toggle('sel', it.r === sel);
+    v.g.classList.toggle('out', it.r.out);
+  }
+
+  // Mərkəz
+  S.lap.textContent = f.total ? `${f.lap}/${f.total}` : String(f.lap);
+  S.pill.textContent = STATUS_TEXT[f.status];
+  S.pill.setAttribute('class', 'pill ' + f.status);
+  S.refT.textContent = 'Reference lap: ' + fmtLap(f.ref);
+  S.info.textContent = sel ? `${sel.code} · P${sel.pos}` : '';
+
+  // Pit proqnozu
+  const loss = state.pitLoss * (f.status === 'SC' ? 0.5 : 1);   // Safety Car altında pit təxminən yarı qədər itirir
+  const pred = pitPrediction(f, sel, loss);
+  if(pred){
+    const a0 = angleOf(sel.gap, f.ref);
+    const span = Math.min(340, loss / f.ref * 360);
+    const N = Math.max(2, Math.ceil(span / 4));
+    let dpath = '';
+    for(let i = 0; i <= N; i++){
+      const p = polar(a0 - span * i / N, R);
+      dpath += (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1);
+    }
+    S.pitArc.setAttribute('d', dpath);
+    const a1 = a0 - span;
+    const gp = polar(a1, R), gt = polar(a1, R - 40);
+    S.ghost.setAttribute('cx', gp.x); S.ghost.setAttribute('cy', gp.y); S.ghost.removeAttribute('display');
+    S.ghostT.setAttribute('x', gt.x); S.ghostT.setAttribute('y', gt.y); S.ghostT.removeAttribute('display');
+    S.ghostT.textContent = 'P' + pred.pos;
+    S.pitT.textContent = `İndi pit → P${pred.pos}`;
+  } else {
+    S.pitArc.setAttribute('d', '');
+    S.ghost.setAttribute('display', 'none'); S.ghostT.setAttribute('display', 'none');
+    S.pitT.textContent = '';
+  }
+
+  // Saat və yan panel (HTML yeniləməsi bahalıdır, ona görə 8 dəfə/saniyə)
+  const now = performance.now();
+  if(now - state.uiAt > 120){
+    state.uiAt = now;
+    $('#clock').textContent = state.mode === 'live' ? new Date().toLocaleTimeString() : fmtClock(f.T);
+    if(state.mode !== 'live'){ $('#scrub').value = f.T; }
+    updateBoard(f, sel);
+    updatePitPanel(f, sel, pred, loss);
+  }
+}
+
+/* ---- yan panel (HTML) ---- */
+function buildBoard(drivers){
+  const ol = $('#board');
+  ol.textContent = '';
+  state.boardLis = new Map();
+  for(const d of drivers){
+    const li = document.createElement('li');
+    li.dataset.code = d.code;
+    li.innerHTML = '<span class="pos"></span><i class="sw"></i><b></b><span class="gap"></span>';
+    li.querySelector('.sw').style.background = d.color;
+    li.querySelector('b').textContent = d.code;
+    li.addEventListener('click', () => select(d.code));
+    state.boardLis.set(d.code, li);
+    ol.appendChild(li);
+  }
+}
+function updateBoard(f, sel){
+  const frag = document.createDocumentFragment();
+  for(const r of f.drivers){
+    const li = state.boardLis.get(r.code);
+    if(!li) continue;
+    li.querySelector('.pos').textContent = r.pos;
+    li.querySelector('.gap').textContent = gapText(r, sel);
+    li.classList.toggle('sel', r === sel);
+    frag.appendChild(li);
+  }
+  $('#board').appendChild(frag);        // mövcud elementləri yeni sırada yerləşdirir
+}
+function updatePitPanel(f, sel, pred, loss){
+  const box = $('#pitOut');
+  if(!pred){
+    box.innerHTML = '<p>Sürücünü dairədən və ya siyahıdan seçin.</p>';
+    return;
+  }
+  box.textContent = '';
+  const big = document.createElement('p'); big.className = 'big';
+  big.textContent = `${sel.code}: P${sel.pos} → P${pred.pos}`;
+  const p1 = document.createElement('p');
+  p1.textContent = `İndi pit etsə ${loss.toFixed(0)} san itirər` + (f.status === 'SC' ? ' (Safety Car altında yarıya enir).' : '.');
+  const p2 = document.createElement('p');
+  const a = pred.carAhead, b = pred.carBehind;
+  p2.textContent = a && b ? `Qayıdanda ${a.code} ilə ${b.code} arasında olacaq.`
+                 : a ? `Qayıdanda sonuncu olacaq, ${a.code}-in arxasında.`
+                 : `Qayıdanda liderlik edəcək.`;
+  box.append(big, p1, p2);
+}
+
+/* ==========================================================================
+   8) İDARƏETMƏ
+   ========================================================================== */
+const state = {
+  mode:'sim', race:null, T:0, playing:true, speed:20,
+  selected:null, pitLoss:22, seed:2026, liveFrame:null, uiAt:0, boardLis:new Map(),
+};
+
+function setMsg(text, kind){
+  const m = $('#msg');
+  m.textContent = text || '';
+  m.className = 'msg' + (kind ? ' ' + kind : '');
+}
+
+function select(code){
+  state.selected = state.selected === code ? null : code;
+  const v = S.views.get(code);
+  if(v && state.selected) S.layer.appendChild(v.g);      // seçilmiş sürücü hamının üstündə görünsün
+  state.uiAt = 0;                                         // paneli dərhal yenilə
+}
+
+// Yeni yarışı yükləyir və səhnəni qurur
+function setRace(race, startT){
+  state.race = race;
+  state.T = startT;
+  if(state.selected && !race.drivers.some(d => d.code === state.selected)) state.selected = null;
+  buildStage(race);
+  buildBoard(race.drivers);
+  const scrub = $('#scrub');
+  scrub.max = Math.floor(race.endTime);
+  scrub.value = startT;
+  setPlaying(true);
+}
+function setPlaying(on){
+  state.playing = on;
+  $('#play').textContent = on ? 'Dayandır' : 'Davam et';
+}
+
+function startSim(seed){
+  state.seed = seed;
+  $('#seedOut').textContent = seed;
+  const race = simulateRace(seed);
+  const t0 = race.drivers[0].cum[Math.min(10, race.total)] || 0;   // 10-cu dövrədən başla ki, dairə dolu görünsün
+  setRace(race, t0);
+  // İlk açılışda funksiyanı göstərmək üçün 3-cü yerdəki sürücünü seçirik
+  const f = computeFrame(race, t0);
+  state.selected = f.drivers[2].code;
+  S.layer.appendChild(S.views.get(state.selected).g);
+  setMsg(race.title + ': ' + race.drivers.length + ' sürücü, ' + race.total + ' dövrə. Məlumat uydurmadır.');
+}
+
+function setMode(mode){
+  stopLive();
+  state.mode = mode;
+  document.querySelectorAll('#modeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+  $('#panelSim').hidden = mode !== 'sim';
+  $('#panelReplay').hidden = mode !== 'replay';
+  $('#panelLive').hidden = mode !== 'live';
+  const isLive = mode === 'live';
+  ['#play', '#scrub'].forEach(s => { $(s).disabled = isLive; });
+  document.querySelectorAll('#speeds button').forEach(b => { b.disabled = isLive; });
+  if(mode === 'sim') startSim(state.seed);
+  if(mode === 'replay') setMsg('İli seçib "Yarışları gətir" düyməsini basın.');
+  if(mode === 'live') startLive();
+}
+
+// --- düymələrin qoşulması ---
+$('#modeSeg').addEventListener('click', e => { const b = e.target.closest('button'); if(b) setMode(b.dataset.mode); });
+$('#newRace').addEventListener('click', () => startSim(Math.floor(Math.random() * 1e6)));
+$('#play').addEventListener('click', () => {
+  if(!state.playing && state.T >= state.race.endTime) state.T = 0;    // bitibsə əvvəldən
+  setPlaying(!state.playing);
+});
+$('#speeds').addEventListener('click', e => {
+  const b = e.target.closest('button'); if(!b) return;
+  state.speed = +b.dataset.speed;
+  document.querySelectorAll('#speeds button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+});
+$('#scrub').addEventListener('input', e => { state.T = +e.target.value; });
+$('#pitLoss').addEventListener('input', e => { state.pitLoss = +e.target.value; $('#pitLossOut').textContent = e.target.value; state.uiAt = 0; });
+document.addEventListener('keydown', e => {
+  if(e.target.matches('input,select,textarea')) return;
+  if(e.code === 'Space' && e.target === document.body){ e.preventDefault(); if(state.mode !== 'live') $('#play').click(); }
+  if(e.key === 'Escape'){ state.selected = null; state.uiAt = 0; }
+});
+
+// OpenF1 təkrar: siyahı və yükləmə
+$('#loadList').addEventListener('click', async () => {
+  const sel = $('#gp'); const year = +$('#year').value;
+  setMsg(year + ' yarışları gətirilir…');
+  try{
+    const rows = await getJSON('/sessions?year=' + year + '&session_name=Race');
+    rows.sort((a, b) => String(a.date_start).localeCompare(String(b.date_start)));
+    sel.textContent = '';
+    for(const r of rows){
+      const o = document.createElement('option');
+      o.value = r.session_key;
+      o.textContent = `${r.country_name || ''} — ${r.location || r.circuit_short_name || ''} (${String(r.date_start).slice(0, 10)})`;
+      sel.appendChild(o);
+    }
+    $('#loadRace').disabled = !rows.length;
+    setMsg(rows.length ? rows.length + ' yarış tapıldı.' : 'Bu il üçün yarış tapılmadı.', rows.length ? 'ok' : 'err');
+  }catch(e){ setMsg(explainError(e), 'err'); }
+});
+$('#loadRace').addEventListener('click', async () => {
+  const sel = $('#gp'); if(!sel.value) return;
+  const title = sel.options[sel.selectedIndex].textContent;
+  $('#loadRace').disabled = true;
+  try{
+    const race = await loadReplay(sel.value, title);
+    setRace(race, 0);
+    setMsg('Yükləndi: ' + title + '. ' + race.drivers.length + ' sürücü, ' + race.total + ' dövrə.', 'ok');
+  }catch(e){ setMsg(explainError(e), 'err'); }
+  finally{ $('#loadRace').disabled = false; }
+});
+
+/* ---- ANİMASİYA DÖVRÜ ----
+   requestAnimationFrame brauzerin ekran yenilənməsindən əvvəl (adətən saniyədə 60 dəfə)
+   funksiyamızı çağırır. Hər çağırışda: vaxtı irəli çək -> frame hesabla -> çək. */
+let lastTs = performance.now();
+function tick(ts){
+  const dt = Math.min(0.25, (ts - lastTs) / 1000);       // tab arxa planda qalıbsa, böyük sıçrayış olmasın
+  lastTs = ts;
+  try{
+    if(state.mode === 'live'){
+      if(live.frame) draw(live.frame);
+    } else if(state.race){
+      if(state.playing){
+        state.T = Math.min(state.race.endTime, state.T + dt * state.speed);
+        if(state.T >= state.race.endTime) setPlaying(false);
+      }
+      draw(computeFrame(state.race, state.T));
+    }
+  }catch(err){ console.error(err); }
+  requestAnimationFrame(tick);
+}
+
+// Başlanğıc
+startSim(state.seed);
+requestAnimationFrame(tick);
+
+// Sınaq və öyrənmə üçün konsoldan əlçatan: CoD.simulateRace(1), CoD.computeFrame(...)
+window.CoD = { simulateRace, computeFrame, buildRaceFromOpenF1, buildLiveFrame, pitPrediction, parseScLaps, state, setRace };
+</script>
+</body>
+</html>
